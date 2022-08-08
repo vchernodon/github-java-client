@@ -7,9 +7,9 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -65,6 +65,8 @@ import org.slf4j.LoggerFactory;
  * functionality as well as acts as a factory for the higher level API clients.
  */
 public class GitHubClient {
+
+  private static final int EXPIRY_MARGIN_IN_MINUTES = 3;
 
   private Tracer tracer = NoopTracer.INSTANCE;
 
@@ -514,6 +516,20 @@ public class GitHubClient {
   }
 
   /**
+   * Make a HTTP PUT request for the given path with provided JSON body.
+   *
+   * @param path relative to the Github base url
+   * @param data request body as stringified JSON
+   * @param clazz class to cast response as
+   * @return response body deserialized as provided class
+   */
+  <T> CompletableFuture<T> put(final String path, final String data, final Class<T> clazz) {
+    return put(path, data)
+        .thenApply(
+            response -> json().fromJsonUncheckedNotNull(responseBodyUnchecked(response), clazz));
+  }
+
+  /**
    * Make an http PATCH request for the given path with provided JSON body.
    *
    * @param path relative to the Github base url
@@ -530,12 +546,26 @@ public class GitHubClient {
   }
 
   /**
+   * Make an http PATCH request for the given path with provided JSON body.
+   *
+   * @param path relative to the Github base url
+   * @param data request body as stringified JSON
+   * @param clazz class to cast response as
+   * @return response body deserialized as provided class
+   */
+  <T> CompletableFuture<T> patch(final String path, final String data, final Class<T> clazz) {
+    return patch(path, data)
+        .thenApply(
+            response -> json().fromJsonUncheckedNotNull(responseBodyUnchecked(response), clazz));
+  }
+
+  /**
    * Make an http PATCH request for the given path with provided JSON body
    *
    * @param path relative to the Github base url
    * @param data request body as stringified JSON
    * @param clazz class to cast response as
-   * @return response body as String
+   * @return response body deserialized as provided class
    */
   <T> CompletableFuture<T> patch(
       final String path,
@@ -658,7 +688,8 @@ public class GitHubClient {
   }
 
   private boolean isExpired(final AccessToken token) {
-    return token.expiresAt().isBefore(ZonedDateTime.now().plusMinutes(-1));
+    // Subtract a few minutes to avoid making calls with an expired token due to clock differences
+    return token.expiresAt().isBefore(ZonedDateTime.now().minusMinutes(EXPIRY_MARGIN_IN_MINUTES));
   }
 
   private AccessToken generateInstallationToken(final String jwtToken, final int installationId)
@@ -741,10 +772,10 @@ public class GitHubClient {
     String bodyString = res.body() != null ? res.body().string() : "";
     if (res.code() == FORBIDDEN) {
       if (bodyString.contains("Repository was archived so is read-only")) {
-        return new ReadOnlyRepositoryException(request.url().encodedPath(), res.code(), bodyString);
+        return new ReadOnlyRepositoryException(request.method(), request.url().encodedPath(), res.code(), bodyString);
       }
     }
-    return new RequestNotOkException(request.url().encodedPath(), res.code(), bodyString);
+    return new RequestNotOkException(request.method(), request.url().encodedPath(), res.code(), bodyString);
   }
 
   CompletableFuture<Response> processPossibleRedirects(
@@ -758,7 +789,7 @@ public class GitHubClient {
       final Request request =
           requestBuilder(newLocation)
               .url(newLocation)
-              .method("POST", response.request().body())
+              .method(response.request().method(), response.request().body())
               .build();
       // Do the new call and complete the original future when the new call completes
       return call(request);

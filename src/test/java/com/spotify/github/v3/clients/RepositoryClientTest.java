@@ -7,9 +7,9 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,23 +23,25 @@ package com.spotify.github.v3.clients;
 import static com.google.common.io.Resources.getResource;
 import static com.spotify.github.FixtureHelper.loadFixture;
 import static com.spotify.github.v3.UserTest.assertUser;
-import static com.spotify.github.v3.clients.GitHubClient.LIST_COMMIT_TYPE_REFERENCE;
 import static com.spotify.github.v3.clients.GitHubClient.LIST_BRANCHES;
+import static com.spotify.github.v3.clients.GitHubClient.LIST_COMMIT_TYPE_REFERENCE;
 import static com.spotify.github.v3.clients.GitHubClient.LIST_FOLDERCONTENT_TYPE_REFERENCE;
+import static com.spotify.github.v3.clients.GitHubClient.LIST_PR_TYPE_REFERENCE;
 import static com.spotify.github.v3.clients.GitHubClient.LIST_REPOSITORY;
 import static com.spotify.github.v3.clients.MockHelper.createMockResponse;
 import static com.spotify.github.v3.clients.RepositoryClient.STATUS_URI_TEMPLATE;
 import static java.lang.String.format;
 import static java.nio.charset.Charset.defaultCharset;
 import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.stream.StreamSupport.stream;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
-import static java.util.stream.StreamSupport.stream;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
@@ -47,6 +49,7 @@ import com.google.common.io.Resources;
 import com.spotify.github.async.AsyncPage;
 import com.spotify.github.jackson.Json;
 import com.spotify.github.v3.comment.Comment;
+import com.spotify.github.v3.prs.PullRequestItem;
 import com.spotify.github.v3.repos.Branch;
 import com.spotify.github.v3.repos.Commit;
 import com.spotify.github.v3.repos.CommitComparison;
@@ -55,6 +58,8 @@ import com.spotify.github.v3.repos.CommitStatus;
 import com.spotify.github.v3.repos.Content;
 import com.spotify.github.v3.repos.FolderContent;
 import com.spotify.github.v3.repos.Repository;
+import com.spotify.github.v3.repos.RepositoryInvitation;
+import com.spotify.github.v3.repos.RepositoryPermission;
 import com.spotify.github.v3.repos.RepositoryTest;
 import com.spotify.github.v3.repos.Status;
 import com.spotify.github.v3.repos.requests.ImmutableAuthenticatedUserRepositoriesFilter;
@@ -72,6 +77,7 @@ import okhttp3.ResponseBody;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.powermock.core.classloader.annotations.PrepareForTest;
 import org.powermock.modules.junit4.PowerMockRunner;
 
@@ -157,6 +163,51 @@ public class RepositoryClientTest {
   }
 
   @Test
+  public void addCollaborator() throws Exception {
+    final Response response = createMockResponse("", getFixture("repository_invitation.json"));
+    when(github.put("/repos/someowner/somerepo/collaborators/user", "{\"permission\":\"pull\"}")).thenReturn(
+        completedFuture(response));
+
+    final Optional<RepositoryInvitation> maybeInvite = repoClient.addCollaborator("user",
+        RepositoryPermission.PULL).get();
+
+    assertTrue(maybeInvite.isPresent());
+    final RepositoryInvitation repoInvite = maybeInvite.get();
+    assertThat(repoInvite.id(), is(1));
+    assertThat(repoInvite.nodeId(), is("MDEwOlJlcG9zaXRvcnkxMjk2MjY5"));
+    assertThat(repoInvite.repository().id(), is(1296269));
+    assertUser(repoInvite.repository().owner());
+    assertUser(repoInvite.invitee());
+    assertUser(repoInvite.inviter());
+    assertThat(repoInvite.permissions(), is("write"));
+  }
+
+  @Test
+  public void addCollaboratorUserExists() throws Exception {
+    final Response response = mock(Response.class);
+    when(response.code()).thenReturn(204);
+    when(github.put("/repos/someowner/somerepo/collaborators/user", "{\"permission\":\"pull\"}")).thenReturn(
+        completedFuture(response));
+
+    final Optional<RepositoryInvitation> maybeInvite = repoClient.addCollaborator("user",
+        RepositoryPermission.PULL).get();
+
+    assertTrue(maybeInvite.isEmpty());
+  }
+
+  @Test
+  public void removeCollaborator() throws Exception {
+    CompletableFuture<Response> response = completedFuture(mock(Response.class));
+    final ArgumentCaptor<String> capture = ArgumentCaptor.forClass(String.class);
+    when(github.delete(capture.capture())).thenReturn(response);
+
+    CompletableFuture<Void> deleteResponse = repoClient.removeCollaborator("user");
+    deleteResponse.get();
+
+    assertThat(capture.getValue(), is("/repos/someowner/somerepo/collaborators/user"));
+  }
+
+  @Test
   public void listCommits() throws Exception {
     final CompletableFuture<List<CommitItem>> fixture =
         completedFuture(
@@ -169,6 +220,18 @@ public class RepositoryClientTest {
     assertThat(commits.get(0).commit().message(), is("Fix all the bugs"));
     assertThat(
         commits.get(0).commit().tree().sha(), is("6dcb09b5b57875f334f61aebed695e2e4193db5e"));
+  }
+
+  @Test
+  public void listPullRequestsForCommit() throws Exception {
+    final CompletableFuture<List<PullRequestItem>> fixture =
+        completedFuture(
+            json.fromJson("[" + getFixture("../prs/pull_request_item.json") + "]", LIST_PR_TYPE_REFERENCE));
+    when(github.request(eq("/repos/someowner/somerepo/commits/thesha/pulls"), eq(LIST_PR_TYPE_REFERENCE), any()))
+        .thenReturn(fixture);
+    final List<PullRequestItem> prs = repoClient.listPullRequestsForCommit("thesha").get();
+    assertThat(prs.size(), is(1));
+    assertThat(prs.get(0).number(), is(1347));
   }
 
   @Test
@@ -251,21 +314,39 @@ public class RepositoryClientTest {
         .thenReturn(fixture);
     final Branch branch = repoClient.getBranch("somebranch").get();
     assertThat(branch.isProtected().orElse(false), is(true));
+    assertThat(branch.protectionUrl().get().toString(), is("https://api.github.com/repos/octocat/Hello-World/branches/master/protection"));
     assertThat(branch.commit().sha(), is("6dcb09b5b57875f334f61aebed695e2e4193db5e"));
     assertThat(
         branch.commit().url().toString(),
         is("https://api.github.com/repos/octocat/Hello-World/commits/c5b97d5ae6c19d5c5df71a34c7fbeeda2479ccbc"));
+    assertTrue(branch.protection().isPresent());
+    assertTrue(branch.protection().get().enabled());
+    assertThat(branch.protection().get().requiredStatusChecks().enforcementLevel(), is("non_admins"));
+    assertTrue(branch.protection().get().requiredStatusChecks().contexts().contains("Context 1"));
+    assertTrue(branch.protection().get().requiredStatusChecks().contexts().contains("Context 2"));
   }
 
   @Test
-  public void getBranchWithoutProtection() throws Exception {
-    // Make sure the custom deserialiser correctly handles the optional protected fields
+  public void getBranchWithNoProtection() throws Exception {
     final CompletableFuture<Branch> fixture =
         completedFuture(json.fromJson(getFixture("branch-not-protected.json"), Branch.class));
     when(github.request("/repos/someowner/somerepo/branches/somebranch", Branch.class))
         .thenReturn(fixture);
     final Branch branch = repoClient.getBranch("somebranch").get();
     assertThat(branch.isProtected().orElse(false), is(false));
+    assertTrue(branch.protectionUrl().isEmpty());
+    assertThat(branch.commit().sha(), is("6dcb09b5b57875f334f61aebed695e2e4193db5e"));
+  }
+
+  @Test
+  public void getBranchWithoutProtectionFields() throws Exception {
+    final CompletableFuture<Branch> fixture =
+        completedFuture(json.fromJson(getFixture("branch-no-protection-fields.json"), Branch.class));
+    when(github.request("/repos/someowner/somerepo/branches/somebranch", Branch.class))
+        .thenReturn(fixture);
+    final Branch branch = repoClient.getBranch("somebranch").get();
+    assertThat(branch.isProtected().orElse(false), is(false));
+    assertTrue(branch.protectionUrl().isEmpty());
     assertThat(branch.commit().sha(), is("6dcb09b5b57875f334f61aebed695e2e4193db5e"));
     assertThat(
         branch.commit().url().toString(),

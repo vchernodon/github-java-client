@@ -1,8 +1,8 @@
 /*-
  * -\-\-
- * github-api
+ * github-client
  * --
- * Copyright (C) 2016 - 2020 Spotify AB
+ * Copyright (C) 2016 - 2022 Spotify AB
  * --
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,20 +18,16 @@
  * -/-/-
  */
 
-package com.spotify.github.v3.exceptions;
+package com.spotify.github.v3.repos;
 
-/** The Read only repository exception. */
-public class ReadOnlyRepositoryException extends RequestNotOkException {
-  /**
-   * Instantiates a new Read only repository exception.
-   *
-   * @param method HTTP method
-   * @param path the path
-   * @param statusCode the status code
-   * @param msg the msg
-   */
-  public ReadOnlyRepositoryException(
-      final String method, final String path, final int statusCode, final String msg) {
-    super(method, path, statusCode, msg);
-  }
+/** Helpful constants for Repository permissions. */
+public class RepositoryPermission {
+
+  public static final String PULL = "pull";
+  public static final String PUSH = "push";
+  public static final String ADMIN = "admin";
+  public static final String MAINTAIN = "maintain";
+  public static final String TRIAGE = "triage";
+
+  private RepositoryPermission() {}
 }

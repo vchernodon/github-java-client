@@ -7,9 +7,9 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -24,6 +24,7 @@ import static com.spotify.github.v3.clients.GitHubClient.IGNORE_RESPONSE_CONSUME
 import static com.spotify.github.v3.clients.GitHubClient.LIST_BRANCHES;
 import static com.spotify.github.v3.clients.GitHubClient.LIST_COMMIT_TYPE_REFERENCE;
 import static com.spotify.github.v3.clients.GitHubClient.LIST_FOLDERCONTENT_TYPE_REFERENCE;
+import static com.spotify.github.v3.clients.GitHubClient.LIST_PR_TYPE_REFERENCE;
 import static com.spotify.github.v3.clients.GitHubClient.LIST_REPOSITORY;
 import static com.spotify.github.v3.clients.GitHubClient.LIST_STATUS_TYPE_REFERENCE;
 
@@ -34,6 +35,7 @@ import com.spotify.github.v3.comment.Comment;
 import com.spotify.github.v3.exceptions.RequestNotOkException;
 import com.spotify.github.v3.git.Tree;
 import com.spotify.github.v3.hooks.requests.WebhookCreate;
+import com.spotify.github.v3.prs.PullRequestItem;
 import com.spotify.github.v3.repos.Branch;
 import com.spotify.github.v3.repos.Commit;
 import com.spotify.github.v3.repos.CommitComparison;
@@ -43,15 +45,18 @@ import com.spotify.github.v3.repos.Content;
 import com.spotify.github.v3.repos.FolderContent;
 import com.spotify.github.v3.repos.Languages;
 import com.spotify.github.v3.repos.Repository;
+import com.spotify.github.v3.repos.RepositoryInvitation;
 import com.spotify.github.v3.repos.Status;
 import com.spotify.github.v3.repos.requests.AuthenticatedUserRepositoriesFilter;
 import com.spotify.github.v3.repos.requests.RepositoryCreateStatus;
 import java.lang.invoke.MethodHandles;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import javax.ws.rs.core.HttpHeaders;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,6 +74,7 @@ public class RepositoryClient {
   public static final String STATUS_URI_TEMPLATE = "/repos/%s/%s/statuses/%s";
   private static final String COMMITS_URI_TEMPLATE = "/repos/%s/%s/commits";
   private static final String COMMIT_SHA_URI_TEMPLATE = "/repos/%s/%s/commits/%s";
+  private static final String COMMIT_PULL_REQUESTS_SHA_URI_TEMPLATE = "/repos/%s/%s/commits/%s/pulls";
   private static final String COMMIT_STATUS_URI_TEMPLATE = "/repos/%s/%s/commits/%s/status";
   private static final String TREE_SHA_URI_TEMPLATE = "/repos/%s/%s/git/trees/%s";
   private static final String COMPARE_COMMIT_TEMPLATE = "/repos/%s/%s/compare/%s...%s";
@@ -81,7 +87,7 @@ public class RepositoryClient {
   private static final String FORK_TEMPLATE = "/repos/%s/%s/forks";
   private static final String LIST_REPOSITORY_TEMPLATE = "/orgs/%s/repos";
   private static final String LIST_REPOSITORIES_FOR_AUTHENTICATED_USER = "/user/repos";
-  private static final String IS_USER_COLLABORATOR_OF_REPO = "/repos/%s/%s/collaborators/%s";
+  private static final String REPOSITORY_COLLABORATOR = "/repos/%s/%s/collaborators/%s";
   private final String owner;
   private final String repo;
   private final GitHubClient github;
@@ -177,8 +183,50 @@ public class RepositoryClient {
    * @return boolean indicating if user is collaborator
    */
   public CompletableFuture<Boolean> isCollaborator(final String user) {
-    final String path = String.format(IS_USER_COLLABORATOR_OF_REPO, owner, repo, user);
+    final String path = String.format(REPOSITORY_COLLABORATOR, owner, repo, user);
     return github.request(path).thenApply(response -> response.code() == NO_CONTENT);
+  }
+
+  /**
+   * Add a collaborator to the repo.
+   *
+   * @param user       the GitHub username to add
+   * @param permission the permission level for the user; one of RepositoryPermission, or a custom
+   *                   role
+   * @return
+   */
+  public CompletableFuture<Optional<RepositoryInvitation>> addCollaborator(final String user,
+      final String permission) {
+    final String path = String.format(REPOSITORY_COLLABORATOR, owner, repo, user);
+    final String data = github.json().toJsonUnchecked(Map.of("permission", permission));
+    return github
+        .put(path, data)
+        .thenApply(
+            response -> {
+              // Non-successful statuses result in an RequestNotOkException exception and this code
+              // not called.
+              if (response.code() == NO_CONTENT) {
+                /*
+                  GitHub returns a 204 when:
+                  - an existing collaborator is added as a collaborator
+                  - an organization member is added as an individual collaborator
+                  - an existing team member (whose team is also a repository collaborator) is
+                      added as a collaborator
+                 */
+                return Optional.empty();
+              }
+              final RepositoryInvitation invitation =
+                  github
+                      .json()
+                      .fromJsonUnchecked(
+                          GitHubClient.responseBodyUnchecked(response), RepositoryInvitation.class);
+              return Optional.of(invitation);
+            });
+  }
+
+  public CompletableFuture<Void> removeCollaborator(final String user) {
+    final String path = String.format(REPOSITORY_COLLABORATOR, owner, repo, user);
+    return github.delete(path).thenAccept(IGNORE_RESPONSE_CONSUMER);
   }
 
   /**
@@ -205,8 +253,7 @@ public class RepositoryClient {
                   return null;
                 }
 
-                throw new RequestNotOkException(
-                    e1.path(), e1.statusCode(), "Failed creating a webhook: " + request, e);
+                throw e1;
               }
 
               throw new CompletionException(e);
@@ -271,6 +318,22 @@ public class RepositoryClient {
   public CompletableFuture<List<CommitItem>> listCommits() {
     final String path = String.format(COMMITS_URI_TEMPLATE, owner, repo);
     return github.request(path, LIST_COMMIT_TYPE_REFERENCE);
+  }
+
+  /**
+   * List pull requests that contain the given commit.
+   *
+   * @param sha commit sha
+   * @return pull requests
+   */
+  public CompletableFuture<List<PullRequestItem>> listPullRequestsForCommit(final String sha) {
+    final String path = String.format(COMMIT_PULL_REQUESTS_SHA_URI_TEMPLATE, owner, repo, sha);
+
+    // As of GHE 3.2, this feature is still in preview, so we need to add the extra header.
+    // https://developer.github.com/changes/2019-04-11-pulls-branches-for-commit/
+    final Map<String, String> extraHeaders =
+        ImmutableMap.of(HttpHeaders.ACCEPT, "application/vnd.github.groot-preview+json");
+    return github.request(path, LIST_PR_TYPE_REFERENCE, extraHeaders);
   }
 
   /**
